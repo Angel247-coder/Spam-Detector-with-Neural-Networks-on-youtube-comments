@@ -66,8 +66,6 @@ comentario_2 = "This video is so helpful, thank you for making it."
 print(f"Comentario: '{comentario_1}' -> Predicción: {predecir_spam(comentario_1)}")
 print(f"Comentario: '{comentario_2}' -> Predicción: {predecir_spam(comentario_2)}")
 
-!pip install streamlit
-
 !wget -q -O - ipv4.icanhazip.com
 
 !npm install -g localtunnel
