@@ -1,6 +1,7 @@
 pandas
 scikit-learn
 plotly
-textblob
+transformers
+torch
 wordcloud
 matplotlib
