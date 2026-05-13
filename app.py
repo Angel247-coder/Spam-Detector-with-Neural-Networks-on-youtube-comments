@@ -15,7 +15,8 @@ from sklearn.metrics import accuracy_score, classification_report
 
 # 1. Cargar TU dataset de YouTube
 # Usamos el nombre exacto del archivo que subiste
-nombre_archivo = 'Youtube_Unificado_Procesado (4).csv'
+# 1. Cargar TU dataset de YouTube
+nombre_archivo = 'Youtube_Unificado_Procesado.csv'
 df = pd.read_csv(nombre_archivo)
 
 # Limpiamos un poco por si hay filas vacías en el texto o la clase
