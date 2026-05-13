@@ -7,8 +7,6 @@ Original file is located at
     https://colab.research.google.com/drive/1M-OXFkE6drfr46JonFT7M8IIOoXPo1Bg
 """
 
-pip install pandas scikit-learn
-
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
