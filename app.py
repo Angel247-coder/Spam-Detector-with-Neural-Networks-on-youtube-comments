@@ -2,128 +2,129 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from sklearn.model_selection import train_test_split
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.neural_network import MLPClassifier
 from transformers import pipeline
-from wordcloud import WordCloud
+from youtube_comment_downloader import YoutubeCommentDownloader, SORT_BY_RECENT
+from itertools import islice
 import matplotlib.pyplot as plt
+from wordcloud import WordCloud
 
-# --- 1. CONFIGURACIÓN Y ESTILO ---
-st.set_page_config(page_title="IA YouTube Global Analyzer", page_icon="🌎", layout="wide")
+# --- 1. CONFIGURACIÓN ---
+st.set_page_config(page_title="Auditor de YouTube IA", page_icon="🎬", layout="wide")
 
-# CSS para que las tarjetas de métricas resalten
-st.markdown("""
-    <style>
-    [data-testid="stMetricValue"] { font-size: 30px; color: #1f77b4; }
-    .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #e6e9ef; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. CARGA DE MODELOS (CACHÉ) ---
 @st.cache_resource
-def cargar_inteligencia():
-    # A. Cargar Datos
-    df = pd.read_csv('Youtube_Unificado_Procesado.csv')
-    df = df.dropna(subset=['CONTENT', 'CLASS'])
-    df['Etiqueta'] = df['CLASS'].map({0: 'Real ✅', 1: 'Spam 🚨'})
+def cargar_modelos():
+    # Carga de dataset base para entrenar el detector de Spam
+    df_base = pd.read_csv('Youtube_Unificado_Procesado.csv').dropna(subset=['CONTENT', 'CLASS'])
+    
+    # Modelo Spam (Red Neuronal)
+    vec = TfidfVectorizer(stop_words='english', max_features=2000)
+    X = vec.fit_transform(df_base['CONTENT'])
+    m_spam = MLPClassifier(hidden_layer_sizes=(16, 8), max_iter=500, random_state=42)
+    m_spam.fit(X, df_base['CLASS'])
+    
+    # Modelo Sentimiento (Transformer Multilingüe)
+    m_sent = pipeline("sentiment-analysis", model="lxyuan/distilbert-base-multilingual-cased-sentiments-student")
+    
+    return vec, m_spam, m_sent
 
-    # B. IA de Sentimientos Multilingüe (Transformer)
-    modelo_sent = pipeline(
-        "sentiment-analysis", 
-        model="lxyuan/distilbert-base-multilingual-cased-sentiments-student"
-    )
+vec, m_spam, m_sent = cargar_modelos()
 
-    # C. IA de Spam (Red Neuronal)
-    vectorizador = TfidfVectorizer(stop_words='english', max_features=2000)
-    X = vectorizador.fit_transform(df['CONTENT'])
-    y = df['CLASS']
-    modelo_spam = MLPClassifier(hidden_layer_sizes=(16, 8), max_iter=500, random_state=42)
-    modelo_spam.fit(X, y)
+# --- 2. LÓGICA DE EXTRACCIÓN ---
+def extraer_comentarios(url, cantidad):
+    downloader = YoutubeCommentDownloader()
+    try:
+        comments = downloader.get_comments_from_url(url, sort_by=SORT_BY_RECENT)
+        # Tomamos solo N comentarios para no saturar el servidor
+        datos = []
+        for c in islice(comments, cantidad):
+            datos.append({
+                'Autor': c['author'],
+                'Comentario': c['text'],
+                'Fecha': c['time']
+            })
+        return pd.DataFrame(datos)
+    except Exception as e:
+        st.error(f"Error al conectar con YouTube: {e}")
+        return None
 
-    return vectorizador, modelo_spam, df, modelo_sent
-
-with st.spinner('Sincronizando neuronas...'):
-    vectorizador, modelo_spam, df, sentiment_pipe = cargar_inteligencia()
-
-# --- 3. LÓGICA DE CÁLCULO ---
-def analizar_comentario(texto):
-    vec = vectorizador.transform([texto])
-    es_spam = modelo_spam.predict(vec)[0]
-    probs = modelo_spam.predict_proba(vec)[0]
-    res_sent = sentiment_pipe(texto)[0]
-    return es_spam, probs[es_spam] * 100, res_sent['label'].capitalize()
-
-# --- 4. INTERFAZ ---
-st.title("🌎 IA YouTube Sentiment & Spam Analyzer")
-st.write("Panel de control inteligente para la moderación y análisis de audiencia.")
+# --- 3. INTERFAZ ---
+st.title("🎬 Auditor de Audiencia YouTube Pro")
+st.markdown("Analiza la salud de cualquier video mediante **Inteligencia Artificial**.")
 st.divider()
 
-tab1, tab2, tab3 = st.tabs(["🕵️‍♂️ Analizador Individual", "📊 Dashboard de Métricas", "☁️ Nubes de Aspectos"])
+# Barra lateral para configuración
+with st.sidebar:
+    st.header("⚙️ Ajustes de Auditoría")
+    url_video = st.text_input("URL del Video", placeholder="https://www.youtube.com/watch?v=...")
+    n_comments = st.slider("Comentarios a analizar", 10, 200, 50)
+    procesar = st.button("🚀 Iniciar Auditoría", type="primary")
 
-# === PESTAÑA 1: ANALIZADOR ===
-with tab1:
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        user_input = st.text_area("Comentario a examinar:", placeholder="Ej: Awesome content! / Suscríbete a mi canal...")
-        if st.button("Ejecutar IA", type="primary"):
-            if user_input.strip():
-                spam, conf, sent = analizar_comentario(user_input)
-                with c2:
-                    st.subheader("Resultado")
-                    if spam == 1: st.error(f"🚨 SPAM ({conf:.1f}%)")
-                    else: st.success(f"✅ REAL ({conf:.1f}%)")
+if procesar:
+    if not url_video:
+        st.warning("⚠️ Por favor, introduce una URL de YouTube.")
+    else:
+        with st.spinner(f"Analizando los últimos {n_comments} comentarios..."):
+            # A. Descarga
+            df_audit = extraer_comentarios(url_video, n_comments)
+            
+            if df_audit is not None and not df_audit.empty:
+                # B. Análisis IA
+                resultados = []
+                for msg in df_audit['Comentario']:
+                    # Spam Check
+                    v = vec.transform([msg])
+                    is_spam = m_spam.predict(v)[0]
+                    conf = m_spam.predict_proba(v)[0][is_spam] * 100
                     
-                    icon = "🌟" if sent == "Positive" else "💢" if sent == "Negative" else "😶"
-                    st.info(f"{icon} Sentimiento: **{sent}**")
-                    st.progress(conf/100)
+                    # Sentiment Check
+                    sent_res = m_sent(msg)[0]
+                    
+                    resultados.append({
+                        'Spam': "🚨 SÍ" if is_spam == 1 else "✅ NO",
+                        'Confianza': f"{conf:.1f}%",
+                        'Sentimiento': sent_res['label'].capitalize()
+                    })
+                
+                df_final = pd.concat([df_audit, pd.DataFrame(resultados)], axis=1)
 
-# === PESTAÑA 2: DASHBOARD (MÉTRICAS KPI) ===
-with tab2:
-    # --- FILA DE MÉTRICAS (KPIs) ---
-    st.subheader("📈 Indicadores Clave de Desempeño")
-    
-    # Cálculos rápidos
-    total_comentarios = len(df)
-    total_spam = df[df['CLASS'] == 1].shape[0]
-    pct_spam = (total_spam / total_comentarios) * 100
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Comentarios Totales", f"{total_comentarios:,}")
-    m2.metric("Tasa de Spam", f"{pct_spam:.1f}%", delta=f"{total_spam} detectados", delta_color="inverse")
-    m3.metric("Idioma Predominante", "En/Es", delta="Multilingüe activo")
-    
-    st.divider()
-    
-    # Gráficos
-    col_a, col_b = st.columns(2)
-    with col_a:
-        fig_pie = px.pie(df, names='Etiqueta', title="Balance de Spam", hole=0.5, color_discrete_sequence=['#2ecc71', '#e74c3c'])
-        st.plotly_chart(fig_pie, use_container_width=True)
-    with col_b:
-        # Mostramos palabras más comunes en el dataset general
-        st.write("**Top 10 términos en el canal**")
-        cv = CountVectorizer(stop_words='english', max_features=10)
-        counts = cv.fit_transform(df['CONTENT'])
-        w_df = pd.DataFrame({'Palabra': cv.get_feature_names_out(), 'Frecuencia': counts.sum(axis=0).A1}).sort_values('Frecuencia')
-        st.plotly_chart(px.bar(w_df, x='Frecuencia', y='Palabra', orientation='h'), use_container_width=True)
+                # --- C. DASHBOARD DE RESULTADOS ---
+                c1, c2, c3 = st.columns(3)
+                total = len(df_final)
+                spam_count = (df_final['Spam'] == "🚨 SÍ").sum()
+                pos_count = (df_final['Sentimiento'] == "Positive").sum()
 
-# === PESTAÑA 3: NUBES DE PALABRAS ===
-with tab3:
-    st.subheader("Análisis Visual de Aspectos")
-    c_spam, c_real = st.columns(2)
-    
-    with c_spam:
-        st.write("🚨 **Tendencias en Spam**")
-        wc_s = WordCloud(background_color="white", colormap="Reds").generate(" ".join(df[df['CLASS'] == 1]['CONTENT']))
-        fig_s, ax_s = plt.subplots(); ax_s.imshow(wc_s); ax_s.axis("off")
-        st.pyplot(fig_s)
+                c1.metric("Comentarios Extraídos", total)
+                c2.metric("Nivel de Spam", f"{(spam_count/total)*100:.1f}%", delta=f"{spam_count} bots", delta_color="inverse")
+                c3.metric("Felicidad Audiencia", f"{(pos_count/total)*100:.1f}%")
 
-    with c_real:
-        st.write("✅ **Temas de Interés Real**")
-        wc_r = WordCloud(background_color="white", colormap="Blues").generate(" ".join(df[df['CLASS'] == 0]['CONTENT']))
-        fig_r, ax_r = plt.subplots(); ax_r.imshow(wc_r); ax_r.axis("off")
-        st.pyplot(fig_r)
+                st.divider()
 
-# --- FOOTER ---
-st.divider()
-st.caption("🚀 Neural Network (Scikit-Learn) + Transformer (Hugging Face) | v3.0")
+                # Visualización Gráfica
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    fig_sent = px.pie(df_final, names='Sentimiento', title="Clima Emocional", 
+                                     color_discrete_map={'Positive':'#2ecc71', 'Negative':'#e74c3c', 'Neutral':'#95a5a6'})
+                    st.plotly_chart(fig_sent, use_container_width=True)
+                
+                with col_b:
+                    st.write("**Nube de Temas Reales** (Sin Spam)")
+                    reales = " ".join(df_final[df_final['Spam'] == "✅ NO"]['Comentario'])
+                    if reales.strip():
+                        wc = WordCloud(background_color="white", colormap="Blues").generate(reales)
+                        fig_wc, ax = plt.subplots(); ax.imshow(wc); ax.axis("off")
+                        st.pyplot(fig_wc)
+
+                # Tabla detallada
+                st.subheader("📋 Detalle de la Auditoría")
+                st.dataframe(df_final, use_container_width=True)
+                
+                # Botón de Descarga
+                csv = df_final.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Descargar Reporte CSV", data=csv, file_name="auditoria_youtube.csv")
+
+            else:
+                st.error("No se pudieron obtener comentarios. Verifica que el video no tenga los comentarios desactivados.")
+else:
+    st.info("Pega una URL de YouTube en la barra lateral para comenzar el análisis en tiempo real.")
