@@ -1,11 +1,11 @@
-google-api-python-client
-matplotlib
-nltk
-numpy
+streamlit
 pandas
+numpy
+matplotlib
 plotly
 scikit-learn
-streamlit
+nltk
 transformers
-torch
 wordcloud
+google-api-python-client   # NUEVO: Para la API oficial de YouTube
+tensorflow                 # NUEVO: Para la Red Neuronal Superficial (Keras)
