@@ -1,33 +1,3 @@
-"""
-IA YouTube Global Auditor — v5.1
-
-Correcciones respecto a versión anterior
-─────────────────────────────────────────
-SPAM
-  Capa 1 — señal de batch:
-    Mismo autor + textos casi idénticos (ratio ≥ 0.80) repetidos ≥ 2 veces
-    → spam inmediato, sin pasar por ML.
-    Captura bots que postean el mismo mensaje N veces con usuarios distintos.
-
-  Capa 2 — reglas duras:
-    URL presente / ratio MAYÚSCULAS > 60 % / "!!" / 3+ palabras de léxico spam
-    / palabras repetidas en secuencia → spam seguro.
-
-  Capa 3 — ML (sólo si las capas 1 y 2 no son concluyentes):
-    TF-IDF bigramas + 10 features manuales → LogisticRegression C=0.3
-    (regularización fuerte para no memorizar el dataset de entrenamiento).
-
-SENTIMIENTO
-  Preprocesado: elimina URLs, timestamps, @menciones y emojis antes de
-  enviar texto a cualquier modelo.
-
-  VADER (lexicón): árbitro principal para textos < 6 palabras o cuando
-  el transformer tiene confianza < 0.60.
-  Mucho más fiable en frases cortas y neutrales.
-
-  Transformer: motor para textos con contexto suficiente (≥ 6 palabras).
-  Si su confianza es baja y VADER discrepa → "Neutral".
-"""
 
 import os
 import re
