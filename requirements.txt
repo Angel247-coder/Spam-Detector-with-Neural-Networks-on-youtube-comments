@@ -1,8 +1,11 @@
-youtube-comment-downloader
+google-api-python-client
+matplotlib
+nltk
+numpy
 pandas
-scikit-learn
 plotly
+scikit-learn
+streamlit
 transformers
 torch
 wordcloud
-matplotlib
