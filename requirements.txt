@@ -1,3 +1,4 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 streamlit
 pandas
 numpy
@@ -8,11 +9,6 @@ nltk
 transformers
 wordcloud
 google-api-python-client
-
-# Versión ligera de TensorFlow para evitar que el servidor colapse
 tensorflow-cpu
-
-# Forzar la descarga de la versión ligera (CPU) de PyTorch
---extra-index-url https://download.pytorch.org/whl/cpu
 torch
 torchvision
