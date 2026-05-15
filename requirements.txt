@@ -7,5 +7,7 @@ scikit-learn
 nltk
 transformers
 wordcloud
-google-api-python-client   
-tensorflow                 
+google-api-python-client
+tensorflow
+torch
+torchvision
