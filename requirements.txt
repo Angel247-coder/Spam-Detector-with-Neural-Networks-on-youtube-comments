@@ -7,5 +7,5 @@ scikit-learn
 nltk
 transformers
 wordcloud
-google-api-python-client   # NUEVO: Para la API oficial de YouTube
-tensorflow                 # NUEVO: Para la Red Neuronal Superficial (Keras)
+google-api-python-client   
+tensorflow                 
