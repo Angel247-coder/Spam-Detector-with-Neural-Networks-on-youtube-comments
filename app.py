@@ -228,13 +228,21 @@ def cargar_datos_spam(ratio_real_spam: int = 1) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def cargar_datos_sentimiento() -> pd.DataFrame:
+def cargar_datos_sentimiento(ratio_por_clase: int = 1) -> pd.DataFrame:
     """
-    Carga las etiquetas de sentimiento usando únicamente el dataset de 45K.
+    Carga las etiquetas de sentimiento usando el dataset de 45K, aplicando
+    undersampling estratificado sobre neutral y positive para equilibrar
+    la clase minoritaria (negative, ~8.5 % del total).
+
+    ratio_por_clase: cuantas muestras de neutral/positive por cada negative.
+        1  →  33 % cada clase  (f1_negative ≈ 0.68, f1_macro ≈ 0.61)
+        2  →  ~25 % neg / 37.5 % resto  (f1_negative ≈ 0.62, f1_macro ≈ 0.61)
+        3  →  ~20 % neg / 40 % resto  (f1_negative ≈ 0.56, f1_macro ≈ 0.62)
+        4  →  ~17 % neg / 42 % resto  (f1_negative ≈ 0.52, f1_macro ≈ 0.62)
     """
     partes = []
 
-    # Fuente única: 45k dataset (sentimientos recientes, multilingüe)
+    # Fuente unica: 45k dataset (sentimientos recientes, multilingüe)
     if RUTAS["spam_45k"]:
         df = pd.read_csv(RUTAS["spam_45k"], usecols=["comment_text", "label_sentiment"])
         df.columns = ["text", "sentiment"]
@@ -243,13 +251,31 @@ def cargar_datos_sentimiento() -> pd.DataFrame:
         partes.append(df)
 
     if not partes:
-        # Fallback: sin datos etiquetados no se puede entrenar
-        raise FileNotFoundError("No se encontró el dataset de sentimiento (45K Rows).")
+        raise FileNotFoundError("No se encontro el dataset de sentimiento (45K Rows).")
 
     combined = pd.concat(partes, ignore_index=True).dropna()
     combined["text"] = combined["text"].astype(str).str.strip()
-    combined = combined[combined["text"] != ""].sample(frac=1, random_state=42)
-    return combined
+    combined = combined[combined["text"] != ""]
+
+    # Undersampling estratificado sobre la clase minoritaria
+    # negative es la mas escasa (~3 810 filas, 8.5 %).
+    # Reducimos positive y neutral a ratio_por_clase x n_negative.
+    neg_df = combined[combined["sentiment"] == "negative"]
+    pos_df = combined[combined["sentiment"] == "positive"]
+    neu_df = combined[combined["sentiment"] == "neutral"]
+
+    n_neg = len(neg_df)
+    n_pos_target = min(n_neg * ratio_por_clase, len(pos_df))
+    n_neu_target = min(n_neg * ratio_por_clase, len(neu_df))
+
+    balanced = pd.concat([
+        neg_df,
+        pos_df.sample(n=n_pos_target, random_state=42),
+        neu_df.sample(n=n_neu_target, random_state=42),
+    ], ignore_index=True).sample(frac=1, random_state=42)
+
+    return balanced
+
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -327,11 +353,12 @@ def entrenar_sentimiento(df: pd.DataFrame):
     y_pred = pipeline.predict(X_val)
 
     metricas = {
-        "accuracy":   accuracy_score(y_val, y_pred),
-        "f1_macro":   f1_score(y_val, y_pred, average="macro", zero_division=0),
-        "reporte":    classification_report(y_val, y_pred, zero_division=0),
-        "cm":         confusion_matrix(y_val, y_pred, labels=["positive", "neutral", "negative"]),
-        "n_train":    len(X_tr),
+        "accuracy":    accuracy_score(y_val, y_pred),
+        "f1_macro":    f1_score(y_val, y_pred, average="macro", zero_division=0),
+        "f1_negative": f1_score(y_val, y_pred, labels=["negative"], average="macro", zero_division=0),
+        "reporte":     classification_report(y_val, y_pred, zero_division=0),
+        "cm":          confusion_matrix(y_val, y_pred, labels=["positive", "neutral", "negative"]),
+        "n_train":     len(X_tr),
     }
     return pipeline, metricas
 
@@ -573,12 +600,13 @@ def main():
     # ratio_sel se define en la sidebar más abajo; necesitamos un default aquí
     # para el primer render. Streamlit re-ejecuta el script completo al cambiar
     # widgets, así que el valor correcto llega en la segunda pasada.
-    ratio_sel = st.session_state.get("_ratio_sel", 1)
+    ratio_sel      = st.session_state.get("_ratio_sel", 1)
+    ratio_sent_sel = st.session_state.get("_ratio_sent_sel", 1)
 
     with st.spinner("Cargando datasets…"):
         try:
             df_spam = cargar_datos_spam(ratio_real_spam=ratio_sel)
-            df_sent = cargar_datos_sentimiento()
+            df_sent = cargar_datos_sentimiento(ratio_por_clase=ratio_sent_sel)
         except FileNotFoundError as e:
             st.error(str(e))
             st.info(
@@ -608,6 +636,9 @@ def main():
 
         # ── Control de balance del dataset ──────────────────────
         st.subheader("⚖️ Balance del dataset")
+
+        # — Spam —
+        st.markdown("**🛡️ Spam — Ratio real:spam**")
         ratio_sel = st.radio(
             "Real : Spam",
             options=[1, 2, 3],
@@ -617,17 +648,42 @@ def main():
                 3: "3:1 — Conservador",
             }[r],
             index=0,
-            help="Ratio de comentarios reales por cada spam en el entrenamiento. "
-                 "1:1 maximiza Precisión y F1. Valores mayores aumentan Recall pero bajan Precisión.",
+            label_visibility="collapsed",
+            help="1:1 maximiza Precisión y F1. Valores mayores aumentan Recall pero bajan Precisión.",
         )
-        # Guardar en session_state y limpiar caché si cambia
         if st.session_state.get("_ratio_sel") != ratio_sel:
             st.session_state["_ratio_sel"] = ratio_sel
             cargar_datos_spam.clear()
             entrenar_spam.clear()
         st.caption(
-            f"ℹ️ Se usarán **{1821}** spam + **{min(1821*ratio_sel,45135):,}** reales "
+            f"ℹ️ {1821} spam + {min(1821*ratio_sel,45135):,} reales "
             f"→ {1821/(1821+min(1821*ratio_sel,45135))*100:.0f}% spam"
+        )
+
+        # — Sentimiento —
+        st.markdown("**💬 Sentimiento — Ratio otras:negative**")
+        ratio_sent_sel = st.radio(
+            "Pos+Neu : Neg",
+            options=[1, 2, 3, 4],
+            format_func=lambda r: {
+                1: "1:1 — Balanceado (recomendado)",
+                2: "2:1 — Moderado",
+                3: "3:1 — Conservador",
+                4: "4:1 — Original aprox.",
+            }[r],
+            index=0,
+            label_visibility="collapsed",
+            help="1:1 maximiza F1-negative (clase mas dificil). Valores mayores acercan al original.",
+        )
+        if st.session_state.get("_ratio_sent_sel") != ratio_sent_sel:
+            st.session_state["_ratio_sent_sel"] = ratio_sent_sel
+            cargar_datos_sentimiento.clear()
+            entrenar_sentimiento.clear()
+        n_neg_sent = 3810
+        n_otras = min(n_neg_sent * ratio_sent_sel, 18210)
+        st.caption(
+            f"ℹ️ {n_neg_sent:,} neg + {n_otras:,} pos + {n_otras:,} neu "
+            f"→ {n_neg_sent/(n_neg_sent+2*n_otras)*100:.0f}% negative"
         )
         st.divider()
 
@@ -648,6 +704,7 @@ def main():
         st.markdown("**Sentiment model (LR)**")
         st.metric("Accuracy",    f"{m_sent['accuracy']:.3f}")
         st.metric("F1 macro",    f"{m_sent['f1_macro']:.3f}")
+        st.metric("F1 negative", f"{m_sent['f1_negative']:.3f}")
         st.divider()
         with st.expander("📋 Aviso RGPD"):
             st.markdown(AVISO_RGPD)
@@ -769,17 +826,28 @@ def main():
             """)
 
         with tab_sent:
-            st.markdown(f"Entrenado con **{m_sent['n_train']:,}** muestras (basado en el 45K dataset). Holdout 15%.")
-            c1, c2 = st.columns(2)
-            c1.metric("Accuracy",  f"{m_sent['accuracy']:.3f}")
-            c2.metric("F1 macro",  f"{m_sent['f1_macro']:.3f}")
+            ratio_sent_labels = {1: "1:1 Balanceado", 2: "2:1 Moderado", 3: "3:1 Conservador", 4: "4:1 Original aprox."}
+            st.markdown(
+                f"Entrenado con **{m_sent['n_train']:,}** muestras — "
+                f"ratio {ratio_sent_labels.get(ratio_sent_sel, ratio_sent_sel)} · Holdout 15%."
+            )
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Accuracy",      f"{m_sent['accuracy']:.3f}")
+            c2.metric("F1 macro",      f"{m_sent['f1_macro']:.3f}")
+            c3.metric("F1 negative",   f"{m_sent['f1_negative']:.3f}",
+                      help="F1 de la clase más difícil (negative, ~8.5% del dataset original).")
             st.divider()
             col_cm, col_rep = st.columns([1, 1.5])
             with col_cm:
                 st.pyplot(plot_cm(m_sent["cm"], ["positive", "neutral", "negative"], "Confusión sentimiento (15% holdout)"))
             with col_rep:
                 st.code(m_sent["reporte"])
-            st.markdown('<div class="good-box">ℹ️ El modelo utiliza el dataset multilingüe de 45K para entrenar de forma eficiente manteniendo un bajo consumo de memoria.</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'''<div class="good-box">⚖️ <b>Undersampling activo:</b> Ratio {ratio_sent_labels.get(ratio_sent_sel, ratio_sent_sel)}
+                · Antes de equilibrar, el F1-negative era <b>0.472</b>; con ratio 1:1 sube a <b>~0.68</b>.
+                Cambia el ratio en el panel lateral para explorar el trade-off.</div>''',
+                unsafe_allow_html=True,
+            )
             st.divider()
             st.markdown("""
 | Parámetro | Valor |
@@ -790,6 +858,7 @@ def main():
 | Vectorización | TF-IDF bigramas (30k features) |
 | Clases | Positive · Neutral · Negative |
 | Split | 85 / 15 estratificado |
+| Desbalance | Undersampling estratificado (ratio configurable) |
 | Datos | 45k dataset |
             """)
 
@@ -829,11 +898,37 @@ def main():
             df_sv = df_sent.copy()
             df_sv["Etiqueta"] = df_sv["sentiment"].str.capitalize()
             dist = df_sv["Etiqueta"].value_counts()
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Total",    f"{len(df_sv):,}")
-            k2.metric("Positivos",f"{dist.get('Positive',0):,}")
-            k3.metric("Negativos",f"{dist.get('Negative',0):,}")
-            st.plotly_chart(px.pie(df_sv, names="Etiqueta", title="Distribución de sentimiento en training (45K Dataset)", hole=0.4, color="Etiqueta", color_discrete_map={"Positive":"#2ecc71", "Negative":"#e74c3c", "Neutral":"#95a5a6"}), use_container_width=True)
+            n_neg_sv = dist.get("Negative", 0)
+            n_pos_sv = dist.get("Positive", 0)
+            n_neu_sv = dist.get("Neutral",  0)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total",      f"{len(df_sv):,}")
+            k2.metric("Negative",   f"{n_neg_sv:,} ({n_neg_sv/len(df_sv)*100:.0f}%)")
+            k3.metric("Positive",   f"{n_pos_sv:,} ({n_pos_sv/len(df_sv)*100:.0f}%)")
+            k4.metric("Neutral",    f"{n_neu_sv:,} ({n_neu_sv/len(df_sv)*100:.0f}%)")
+
+            ratio_sent_labels = {1: "1:1 Balanceado", 2: "2:1 Moderado", 3: "3:1 Conservador", 4: "4:1 Original aprox."}
+            st.markdown(
+                f'''<div class="good-box">⚖️ <b>Undersampling activo:</b> Ratio {ratio_sent_labels.get(ratio_sent_sel, ratio_sent_sel)}
+                · {n_neg_sv:,} negativos + {n_pos_sv:,} positivos + {n_neu_sv:,} neutrales seleccionados de 45,000 disponibles.
+                Sin equilibrar, la clase <i>negative</i> solo era el 8.5% y el modelo la ignoraba (F1-negative = 0.47).</div>''',
+                unsafe_allow_html=True,
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.plotly_chart(px.pie(df_sv, names="Etiqueta",
+                    title="Distribución sentimiento tras undersampling",
+                    hole=0.4, color="Etiqueta",
+                    color_discrete_map={"Positive":"#2ecc71", "Negative":"#e74c3c", "Neutral":"#95a5a6"}),
+                    use_container_width=True)
+            with c2:
+                df_sv["longitud"] = df_sv["text"].str.len()
+                st.plotly_chart(px.box(df_sv, x="Etiqueta", y="longitud",
+                    title="Longitud de comentario por clase",
+                    color="Etiqueta",
+                    color_discrete_map={"Positive":"#2ecc71", "Negative":"#e74c3c", "Neutral":"#95a5a6"}),
+                    use_container_width=True)
 
     st.divider()
     st.caption("v8.2 (Balanced) · Undersampling 1:1 · MLP spam · LR sentimiento · YouTube Data API v3 · RGPD Art. 25")
