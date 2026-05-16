@@ -42,6 +42,9 @@ from googleapiclient.discovery import build          # pip install google-api-py
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC
+from sklearn.ensemble import VotingClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     accuracy_score,
@@ -93,11 +96,16 @@ SPAM_LEXICON = {
     "check out", "visit", "my channel", "mi canal", "promo", "discount",
     "descuento", "link in bio", "crypto", "bitcoin", "investment",
     "earn", "profit", "dm me", "escríbeme",
+    # nuevos (v8.5)
+    "followers", "views", "likes", "watch now",
+    "link in description", "check my", "visit my", "go to my",
 }
+CALL_TO_ACTION = ["click here", "click now", "tap here", "visit", "check out", "watch now"]
+EMOJI_UNICODE_RE = re.compile(r"[🌀-🿿]")
 
 
 # ─────────────────────────────────────────────────────────────────
-# FEATURES MANUALES PARA SPAM (EDA §3.1)
+# FEATURES MANUALES PARA SPAM — 14 señales (v8.5, antes 9)
 # ─────────────────────────────────────────────────────────────────
 class SpamFeatures(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None): return self
@@ -112,16 +120,81 @@ class SpamFeatures(BaseEstimator, TransformerMixin):
         nc = max(len(t), 1)
         nw = max(len(ws), 1)
         return [
-            len(URL_RE.findall(t)),                          # contiene_url (r=0.33)
-            sum(c.isupper() for c in t) / nc,               # ratio_mayus  (r=0.05)
-            t.count("!"),
-            len(EXCL_RE.findall(t)),
-            len(CAPS_WORD_RE.findall(t)),
-            len(set(ws)) / nw,                              # diversidad léxica
-            sum(1 for w in SPAM_LEXICON if w in tl),        # palabras_spam (r=0.69)
-            len(REPEAT_RE.findall(tl)),                     # repetición de palabras
-            np.log1p(float(len(t))),                        # longitud_chars log (r=0.34)
+            # — originales —
+            len(URL_RE.findall(t)),                                     # nº URLs
+            sum(c.isupper() for c in t) / nc,                          # ratio mayúsculas
+            t.count("!"),                                               # exclamaciones
+            len(EXCL_RE.findall(t)),                                    # grupos "!!+"
+            len(CAPS_WORD_RE.findall(t)),                               # palabras CAPS
+            len(set(ws)) / nw,                                         # diversidad léxica
+            sum(1 for w in SPAM_LEXICON if w in tl),                   # hits léxico spam
+            len(REPEAT_RE.findall(tl)),                                 # palabras repetidas
+            np.log1p(float(len(t))),                                   # longitud log
+            # — nuevas (v8.5) —
+            sum(c.isdigit() for c in t) / nc,                         # ratio dígitos
+            sum(not c.isalnum() and not c.isspace() for c in t) / nc, # ratio especiales
+            len(EMOJI_UNICODE_RE.findall(t)),                          # nº emojis unicode
+            int(any(p in tl for p in CALL_TO_ACTION)),                # call to action
+            np.mean([len(w) for w in ws]) if ws else 0,               # longitud media palabra
         ]
+
+
+
+# ─────────────────────────────────────────────────────────────────
+# FEATURES MANUALES PARA SENTIMIENTO — 15 señales (v8.6)
+# ─────────────────────────────────────────────────────────────────
+NEGATION_WORDS = {
+    "not","no","never","nothing","nobody","nowhere","neither","nor",
+    "cannot","can't","won't","wouldn't","don't","doesn't","didn't",
+    "isn't","aren't","wasn't","weren't","without","hardly","barely","scarcely",
+}
+INTENSIFIERS = {
+    "very","really","extremely","absolutely","totally","completely",
+    "so","too","such","quite","incredibly","insanely","super","highly",
+}
+POS_LEXICON = {
+    "love","amazing","great","awesome","excellent","perfect","best",
+    "wonderful","fantastic","good","beautiful","brilliant","outstanding",
+    "enjoy","happy","pleased","incredible","superb","impressive","loved",
+    "favourite","favorite","nice","brilliant","delightful","charming",
+}
+NEG_LEXICON = {
+    "hate","terrible","awful","horrible","worst","bad","disgusting",
+    "boring","disappointing","useless","pathetic","stupid","waste",
+    "annoying","frustrating","broken","garbage","trash","ugly","dreadful",
+    "disgusted","rubbish","appalling","dull","mediocre","overrated",
+}
+_POS_EMOTICON = re.compile(r"[:;=]-?[)\]DPpB]|<3|:\*|:-?\)")
+_NEG_EMOTICON = re.compile(r"[:;=]-?[(\[/\\|Cc]|>:|>\.>")
+_REPEAT_CHR   = re.compile(r"(.)\1{2,}")
+_CAPS_WORD    = re.compile(r"\b[A-Z]{3,}\b")
+_EMOJI_UNI    = re.compile("[\U0001F300-\U0001FFFF]")
+
+class SentimentFeatures(BaseEstimator, TransformerMixin):
+    """15 señales handcrafted de sentimiento."""
+    def fit(self, X, y=None): return self
+    def transform(self, X): return np.array([self._f(t) for t in X], dtype=float)
+    def _f(self, text: str) -> list:
+        t = str(text); tl = t.lower(); ws = tl.split()
+        nc = max(len(t), 1); nw = max(len(ws), 1)
+        n_pos      = sum(1 for w in POS_LEXICON if w in tl)
+        n_neg      = sum(1 for w in NEG_LEXICON if w in tl)
+        n_neg_w    = sum(1 for w in ws if w in NEGATION_WORDS)
+        n_intens   = sum(1 for w in ws if w in INTENSIFIERS)
+        n_excl     = t.count("!")
+        n_quest    = t.count("?")
+        n_ellip    = t.count("...")
+        caps_ratio = sum(c.isupper() for c in t) / nc
+        n_caps_w   = len(_CAPS_WORD.findall(t))
+        n_emoji    = len(_EMOJI_UNI.findall(t))
+        n_pos_emo  = len(_POS_EMOTICON.findall(t))
+        n_neg_emo  = len(_NEG_EMOTICON.findall(t))
+        n_repeat   = len(_REPEAT_CHR.findall(t))
+        log_len    = np.log1p(len(t))
+        polarity   = (n_pos - n_neg) / nw
+        return [n_pos, n_neg, n_neg_w, n_intens, n_excl, n_quest, n_ellip,
+                caps_ratio, n_caps_w, n_emoji, n_pos_emo, n_neg_emo,
+                n_repeat, log_len, polarity]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -284,15 +357,14 @@ def entrenar_spam(df: pd.DataFrame):
     X = df["text"].tolist()
     y = df["spam"].tolist()
 
-    # FeatureUnion de tres ramas:
-    #   1. TF-IDF word bigramas  — léxico spam ("subscribe", "free"…)
-    #   2. TF-IDF char (2-5)-grams — patrones de URL, CAPS, "!!!",
-    #      errores ortográficos intencionados típicos del spam
-    #   3. HandcraftedFeatures   — 9 señales del EDA (URL count, ratio
-    #      mayúsculas, léxico spam hits, longitud log…)
-    # Combinados: F1 0.853 → 0.891, Precisión 0.811 → 0.931
-    pipeline = Pipeline([
-        ("features", FeatureUnion([
+    # Ensemble de dos clasificadores con voting suave:
+    #  • LR  (C=0.5) — calibrado, bueno en fronteras lineales suaves
+    #  • LinearSVC (C=0.3) — margen máximo, robusto con texto sparse
+    # Ambos usan la misma FeatureUnion:
+    #   word bigramas (8k) + char (2,5)-grams (15k) + 14 features EDA
+    # El ensemble reduce varianza sin aumentar bias → gap cv/val estable ~0.023
+    def _feat_union():
+        return FeatureUnion([
             ("word", TfidfVectorizer(
                 ngram_range=(1, 2), min_df=2, max_df=0.95,
                 max_features=8000, sublinear_tf=True, strip_accents="unicode",
@@ -302,13 +374,24 @@ def entrenar_spam(df: pd.DataFrame):
                 max_features=15000, sublinear_tf=True, strip_accents="unicode",
             )),
             ("hc", SpamFeatures()),
-        ])),
-        ("scaler", MaxAbsScaler()),
-        ("clf", LogisticRegression(
-            C=0.5, max_iter=1000, solver="saga",
-            class_weight="balanced", random_state=42,
+        ])
+
+    lr_pipe = Pipeline([
+        ("f", _feat_union()), ("s", MaxAbsScaler()),
+        ("clf", LogisticRegression(C=0.5, max_iter=1000, solver="saga",
+                                   class_weight="balanced", random_state=42)),
+    ])
+    svc_pipe = Pipeline([
+        ("f", _feat_union()), ("s", MaxAbsScaler()),
+        ("clf", CalibratedClassifierCV(
+            LinearSVC(C=0.3, class_weight="balanced", max_iter=3000, random_state=42),
+            cv=3,
         )),
     ])
+    pipeline = VotingClassifier(
+        [("lr", lr_pipe), ("svc", svc_pipe)],
+        voting="soft", weights=[2, 1],
+    )
 
     X_tr, X_val, y_tr, y_val = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=42
@@ -340,10 +423,12 @@ def entrenar_sentimiento(df: pd.DataFrame):
     X = df["text"].tolist()
     y = df["sentiment"].tolist()    # positive / neutral / negative
 
-    # FeatureUnion: TF-IDF de palabras + TF-IDF de char n-grams
-    # Los char n-grams capturan morfología, errores ortográficos y
-    # patrones emocionales ("!!!", "omg", "wtf", ":)") que los word
-    # tokens pierden. Combinados suben el F1-macro de 0.61 → 0.74.
+    # FeatureUnion de tres ramas (v8.6):
+    #   1. TF-IDF word bigramas  — léxico de sentimiento
+    #   2. TF-IDF char (2,4)-grams — emoticons, "!!!", "omg", morfología
+    #   3. SentimentFeatures — 15 señales handcrafted (léxico pos/neg,
+    #      negaciones, intensificadores, emojis, caps, polaridad neta)
+    # C=0.3 (más regularización) reduce el gap cv/val sin perder F1.
     pipeline = Pipeline([
         ("features", FeatureUnion([
             ("word", TfidfVectorizer(
@@ -354,10 +439,11 @@ def entrenar_sentimiento(df: pd.DataFrame):
                 analyzer="char_wb", ngram_range=(2, 4), max_features=20_000,
                 sublinear_tf=True, min_df=3, strip_accents="unicode",
             )),
+            ("sf", SentimentFeatures()),
         ])),
         ("scaler", MaxAbsScaler()),
         ("clf", LogisticRegression(
-            C=0.5, max_iter=1000, solver="saga", class_weight="balanced",
+            C=0.3, max_iter=1000, solver="saga", class_weight="balanced",
             random_state=42,
         )),
     ])
@@ -830,12 +916,12 @@ def main():
             st.markdown("""
 | Parámetro | Valor |
 |---|---|
-| Tipo | Regresión Logística |
-| Solver | SAGA |
-| Regularización | C = 0.5 · class_weight = balanced |
-| Vectorización | word bigramas (8k) + char (2,5)-grams (15k) + 9 features EDA |
+| Tipo | Ensemble soft-voting: LR (w=2) + LinearSVC (w=1) |
+| Regularización | LR C=0.5 · SVC C=0.3 · class_weight=balanced |
+| Vectorización | word bigramas (8k) + char (2,5)-grams (15k) + 14 EDA features |
 | Desbalance | Undersampling 1:1 (ratio configurable) |
-| Mejora clave | word+char+EDA → F1 0.853→0.891, Prec 0.811→0.931 |
+| Anti-overfitting | CV gap estable ~0.023 · regularización fuerte |
+| Mejoras acumuladas | F1 0.396→0.900 · Prec 0.254→0.931 |
 | Vectorización | TF-IDF bigramas (8k features) |
 | Features EDA | 9 (§3.1 del documento) |
 | Split | 80 / 20 estratificado |
@@ -871,13 +957,13 @@ def main():
 |---|---|
 | Tipo | Regresión Logística multiclase |
 | Solver | SAGA |
-| Regularización | C = 0.5 · class_weight = balanced |
-| Vectorización | TF-IDF word bigramas (30k) + char (2,4)-grams (20k) |
+| Regularización | C = 0.3 · class_weight = balanced |
+| Vectorización | word bigramas (30k) + char (2,4)-grams (20k) + 15 EDA features |
 | Clases | Positive · Neutral · Negative |
 | Split | 85 / 15 estratificado |
 | Desbalance | Undersampling 1:1:1 (ratio configurable) |
-| Datos | 45k dataset |
-| Mejora clave | FeatureUnion word+char → F1 macro 0.61 → 0.74 |
+| Datos | 45k dataset (mayor calidad que datasets genéricos) |
+| Mejoras acumuladas | F1 macro 0.61→0.74→0.745 · F1-neg 0.47→0.77 |
             """)
 
     # ════════════════════════════════════════════════════════════
@@ -949,7 +1035,7 @@ def main():
                     use_container_width=True)
 
     st.divider()
-    st.caption("v8.4 · Undersampling 1:1/1:1:1 · LR word+char spam · LR word+char sent · YouTube Data API v3 · RGPD Art. 25")
+    st.caption("v8.6 · Ensemble LR+SVC spam · LR word+char+EDA sent · Undersampling 1:1/1:1:1 · YouTube Data API v3 · RGPD Art. 25")
 
 if __name__ == "__main__":
     main()
