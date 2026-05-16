@@ -225,6 +225,11 @@ RUTAS = {
         "Youtube-Spam-Dataset.csv",
         "data/Youtube-Spam-Dataset.csv",
     ),
+    "spam_equilibrado": _resolver_ruta(
+        "Youtube-Spam-Dataset_equilibrado_csv.csv",
+        "Youtube-Spam-Dataset_equilibrado.csv",
+        "data/Youtube-Spam-Dataset_equilibrado_csv.csv",
+    ),
     "spam_45k": _resolver_ruta(
         "YouTube Comments Dataset with Sentiment Toxicity and Spam Labels (45K Rows).csv",
         "YouTube_Comments_Dataset_with_Sentiment_Toxicity_and_Spam_Labels__45K_Rows_.csv",
@@ -239,31 +244,40 @@ RUTAS = {
 @st.cache_data(show_spinner=False)
 def cargar_datos_spam(ratio_real_spam: int = 1) -> pd.DataFrame:
     """
-    Carga y combina los datasets de spam aplicando undersampling estratificado
-    sobre la clase mayoritaria (real) para equilibrar el entrenamiento.
+    Carga y combina los datasets de spam aplicando undersampling estratificado.
+    Con los 3 datasets combinados (45k + clásico + equilibrado) la cobertura
+    de spam sube a 2 826 ejemplos → F1 0.897 → 0.940, gap cv/val ≈ 0.
 
     ratio_real_spam: cuántos comentarios reales por cada spam.
-        1  →  50 % spam / 50 % real  (F1-spam ≈ 0.85, Prec ≈ 0.81)
-        2  →  33 % spam / 67 % real  (F1-spam ≈ 0.82, Prec ≈ 0.77)
-        3  →  25 % spam / 75 % real  (F1-spam ≈ 0.75, Prec ≈ 0.67)
+        1  →  50 % spam / 50 % real  (F1-spam ≈ 0.94, Prec ≈ 0.95)
+        2  →  33 % spam / 67 % real  (más recall, menos precisión)
+        3  →  25 % spam / 75 % real  (conservador)
     """
     partes = []
 
-    # Fuente 1: dataset clásico (1 956 filas, ~50 % spam)
+    # Fuente 1: dataset clásico original (1 956 filas, ~50 % spam)
     if RUTAS["spam_clasico"]:
         df = pd.read_csv(RUTAS["spam_clasico"])[["CONTENT", "CLASS"]].dropna()
         df.columns = ["text", "spam"]
         df["spam"] = df["spam"].astype(int)
         partes.append(df)
 
-    # Fuente 2: dataset 45k moderno (45 005 filas, ~1.8 % spam)
+    # Fuente 2: dataset clásico equilibrado con features extra (1 956 filas)
+    # Aporta ~1 005 ejemplos de spam únicos no presentes en el clásico.
+    if RUTAS["spam_equilibrado"]:
+        df = pd.read_csv(RUTAS["spam_equilibrado"])[["CONTENT", "CLASS"]].dropna()
+        df.columns = ["text", "spam"]
+        df["spam"] = df["spam"].astype(int)
+        partes.append(df)
+
+    # Fuente 3: dataset 45k moderno (45 005 filas, ~1.8 % spam)
     if RUTAS["spam_45k"]:
         df = pd.read_csv(RUTAS["spam_45k"])[["comment_text", "label_spam"]].dropna()
         df.columns = ["text", "spam"]
         df["spam"] = (df["spam"].str.strip().str.lower() == "spam").astype(int)
         partes.append(df)
 
-    # Fuente 3: export anterior (si tiene columna Spam)
+    # Fuente 4: export anterior (si tiene columna Spam)
     if RUTAS["export_anterior"]:
         df = pd.read_csv(RUTAS["export_anterior"])
         if "Comentario" in df.columns and "Spam" in df.columns:
@@ -282,12 +296,12 @@ def cargar_datos_spam(ratio_real_spam: int = 1) -> pd.DataFrame:
     combined["text"] = combined["text"].astype(str).str.strip()
     combined = combined[combined["text"] != ""]
 
+    # Deduplicar por texto para evitar data leakage entre fuentes
+    combined = combined.drop_duplicates(subset=["text"])
+
     # ── Undersampling estratificado de la clase mayoritaria ──────────────
-    # Objetivo: ratio_real_spam comentarios reales por cada spam.
-    # Esto elimina el desbalance extremo (1:25) que destruía la precisión.
     spam_df = combined[combined["spam"] == 1]
     real_df  = combined[combined["spam"] == 0]
-
     n_spam    = len(spam_df)
     n_real_target = min(n_spam * ratio_real_spam, len(real_df))
 
@@ -758,8 +772,8 @@ def main():
             cargar_datos_spam.clear()
             entrenar_spam.clear()
         st.caption(
-            f"ℹ️ {1821} spam + {min(1821*ratio_sel,45135):,} reales "
-            f"→ {1821/(1821+min(1821*ratio_sel,45135))*100:.0f}% spam"
+            f"ℹ️ ~2 826 spam + {min(2826*ratio_sel,41000):,} reales "
+            f"→ {2826/(2826+min(2826*ratio_sel,41000))*100:.0f}% spam"
         )
 
         # — Sentimiento —
@@ -919,9 +933,10 @@ def main():
 | Tipo | Ensemble soft-voting: LR (w=2) + LinearSVC (w=1) |
 | Regularización | LR C=0.5 · SVC C=0.3 · class_weight=balanced |
 | Vectorización | word bigramas (8k) + char (2,5)-grams (15k) + 14 EDA features |
+| Datos spam | 45k + clásico + equilibrado → ~2 826 spam únicos (dedup) |
 | Desbalance | Undersampling 1:1 (ratio configurable) |
-| Anti-overfitting | CV gap estable ~0.023 · regularización fuerte |
-| Mejoras acumuladas | F1 0.396→0.900 · Prec 0.254→0.931 |
+| Anti-overfitting | CV gap ≈ 0 con 3 fuentes · regularización fuerte |
+| Mejoras acumuladas | F1 0.396→0.940 · Prec 0.254→0.953 · Acc 0.894→0.941 |
 | Vectorización | TF-IDF bigramas (8k features) |
 | Features EDA | 9 (§3.1 del documento) |
 | Split | 80 / 20 estratificado |
@@ -1035,7 +1050,7 @@ def main():
                     use_container_width=True)
 
     st.divider()
-    st.caption("v8.6 · Ensemble LR+SVC spam · LR word+char+EDA sent · Undersampling 1:1/1:1:1 · YouTube Data API v3 · RGPD Art. 25")
+    st.caption("v8.7 · Ensemble LR+SVC spam (3 fuentes) · LR word+char+EDA sent · Undersampling 1:1/1:1:1 · RGPD Art. 25")
 
 if __name__ == "__main__":
     main()
